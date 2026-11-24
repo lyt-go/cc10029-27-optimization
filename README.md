@@ -77,5 +77,24 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 历史重放交付
+
+历史重放的写出副本与完成/取消确认被拆成两段，避免取消与完成交错时互相覆盖：
+
+- 执行重放（`POST /api/exchange_replay/{id}/execute`）写出目标副本后回读磁盘，把
+  **实际可读的分片明细**（分片序号、行号区间、条数、校验值、损坏行）写入
+  `data/replay/delivery/<重放编号>.credential.v<N>.json`，即**重放交付血缘凭据**；
+  同时把「标记完成 / 取消重放」登记为待确认操作。
+- 完成与取消走同一把交付锁仲裁（`/delivery/complete`、`/delivery/cancel`，通用动作接口
+  同样生效）：同一轮只落一个有效交付结论，后到的请求返回原结论而不翻转。完成要求副本
+  实际可读，否则拒绝；取消保留可读分片明细，便于解释取消后还能取哪一份数据。
+- 凭据按版本落盘并带 `artifact_version` 与来源，重启后 `POST /{id}/recover` 可按版本与
+  来源回查；重启后重试完成/取消是幂等的，不会重复写副本或抬版本。
+- 后续取回 `POST /api/exchange_replay/retrieve` 按原批次血缘找当时可用副本：已完成取重放
+  副本，已取消/未定论回落到原批或归档产物，并给出每个来源可取/不可取的原因。取回请求可
+  先排队（`queue: true`），重启后用 `POST /api/exchange_replay/retrievals/drain` 继续。
+- 传输血缘 `record_lineage` 会消费重放交付凭据，把凭据版本、交付结论、来源与分片明细写入
+  血缘产物 `replay_delivery` 字段。
+
 领域：数据工程
 子方向：数仓与数据湖

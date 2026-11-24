@@ -25,6 +25,11 @@ class HistoryArchiveService(BaseModuleService):
     def create_archive(self, batch_codes: list[str]) -> dict[str, Any]:
         """将多个已完成传输批次创建归档卷，计算批次范围与卷内预期条数。"""
         archive_code = f"HIST-{int(time.time())}"
+        # 同一秒内多次归档时避免复用编号，防止归档目录与重放来源相互覆盖
+        while (self._data_dir("archive") / archive_code).exists() or any(
+            row.get("归档编号") == archive_code for row in store.rows(self.MODULE)
+        ):
+            archive_code = f"HIST-{int(time.time())}-{len(store.rows(self.MODULE)) + 1}"
         batch_range = f"{batch_codes[0]}-{batch_codes[-1]}" if batch_codes else "empty"
         archive_path = f"/archive/{archive_code}/"
         values = {
@@ -66,7 +71,7 @@ class HistoryArchiveService(BaseModuleService):
 
         archive_code = archive_entry["归档编号"]
         batch_range = archive_entry["批次范围"]
-        batch_codes = batch_range.split("-") if "-" in batch_range else [batch_range]
+        batch_codes = self._parse_batch_codes(batch_range)
 
         # 聚合批次产物文件到归档目录
         total_records = 0
@@ -107,6 +112,18 @@ class HistoryArchiveService(BaseModuleService):
             "checksum": checksum,
             "artifact_path": str(archive_file),
         }
+
+    @staticmethod
+    def _parse_batch_codes(batch_range: str) -> list[str]:
+        """拆分批次范围；批次编号自身含 '-'，不能整串按 '-' 切分。"""
+        parts = [p for p in batch_range.split("-") if p]
+        if len(parts) <= 2:
+            # 单个批次编号（如 BATCH-A1）本身只含一个 '-'，整串就是一个批次
+            return [batch_range] if batch_range else []
+        # 形如 BATCH-A1-BATCH-A2：前半段为起批、后半段为终批
+        half = len(parts) // 2
+        codes = ["-".join(parts[:half]), "-".join(parts[half:])]
+        return list(dict.fromkeys(codes))
 
     def destroy_archive(self, archive_id: int) -> dict[str, Any]:
         """执行归档卷销毁：标记为已销毁并记录销毁事件。"""

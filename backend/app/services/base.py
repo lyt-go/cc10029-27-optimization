@@ -138,6 +138,61 @@ class BaseModuleService:
                         continue
         return records
 
+    def _read_jsonl_verified(self, filepath: Path) -> tuple[list[dict[str, Any]], int]:
+        """读取 jsonl 并返回（可解析记录, 损坏行数），用于判断产物是否实际可读。"""
+        if not filepath.exists():
+            return [], 0
+        records: list[dict[str, Any]] = []
+        broken = 0
+        with open(filepath, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    broken += 1
+        return records, broken
+
+    def _write_jsonl_atomic(self, filepath: Path, records: list[dict[str, Any]]) -> int:
+        """原子写入 jsonl：先写同目录临时文件并落盘，再整体替换目标文件。
+
+        交付副本只有在完整可读替换成功后才算落盘，避免中断留下半截文件。
+        """
+        _ensure_dir(filepath.parent)
+        tmp = filepath.with_name(f"{filepath.name}.tmp-{os.getpid()}")
+        written = 0
+        with open(tmp, "w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec, ensure_ascii=False, default=str) + "\n")
+                written += 1
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, filepath)
+        return written
+
+    def _write_json_atomic(self, filepath: Path, data: dict[str, Any]) -> Path:
+        """原子写入 JSON 状态文件，供重启后按版本回查。"""
+        _ensure_dir(filepath.parent)
+        tmp = filepath.with_name(f"{filepath.name}.tmp-{os.getpid()}")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, filepath)
+        return filepath
+
+    def _read_json_file(self, filepath: Path) -> dict[str, Any] | None:
+        """读取 JSON 状态文件，缺失或损坏时返回 None。"""
+        if not filepath.exists():
+            return None
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return None
+
     def _write_checkpoint(self, name: str, state: dict[str, Any]) -> Path:
         """将进度状态写入断点文件，支持跨模块水位推进与中断恢复。"""
         p = self._data_dir("checkpoints")
